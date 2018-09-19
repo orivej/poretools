@@ -137,9 +137,9 @@ def main():
                               help=('Only report reads with fewer complement events than template.'))
     parser_fastq.add_argument('--group',
                               dest='group',
-                              default=0,
+                              default=-1,
                               type=int,
-                              help=('Base calling group serial number to extract, default 000'))
+                              help=('Base calling group serial number to extract, default -1 (the highest group)'))
     parser_fastq.add_argument('--basecaller',
 	                          dest='basecaller_name',
 							  help=('Choose reads from the named basecaller'))
@@ -191,9 +191,9 @@ def main():
                               help=('Only report reads with fewer complement events than template.'))
     parser_fasta.add_argument('--group',
                               dest='group',
-                              default=0,
+                              default=-1,
                               type=int,
-                              help=('Base calling group serial number to extract, default 0, use -1 for highest group'))
+                              help=('Base calling group serial number to extract, default -1 (the highest group)'))
     parser_fasta.add_argument('--basecaller',
 	                          dest='basecaller_name',
 							  help=('Choose reads from the named basecaller'))
@@ -221,9 +221,9 @@ def main():
                               help=('Verbose output in tab-separated format.'))
     parser_stats.add_argument('--group',
                               dest='group',
-                              default=0,
+                              default=-1,
                               type=int,
-                              help=('Base calling group serial number to extract, default 000'))
+                              help=('Base calling group serial number to extract, default -1 (the highest group)'))
     parser_stats.set_defaults(func=run_subtool)
 
 
