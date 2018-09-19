@@ -306,13 +306,19 @@ class Fast5File(object):
 
 	def find_highest_group(self):
 		group = 0
+		basecalled_group = 0
 		while True:
 			try:
 				self.hdf5file["/Analyses/Basecall_1D_%03d" % (group)]
 				group += 1
 			except KeyError:
 				break
-		return max((0, group-1))
+			try:
+				self.hdf5file["/Analyses/Basecall_1D_%03d/BaseCalled_template" % (group)]
+				basecalled_group = group
+			except KeyError:
+				pass
+		return basecalled_group
 
 	def get_basecaller_version(self, g):
 		try:
