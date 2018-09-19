@@ -7,6 +7,12 @@ import h5py
 import dateutil.parser
 import datetime
 import time
+import re
+from operator import itemgetter
+try:
+    from os import scandir, walk
+except ImportError:
+    from scandir import scandir, walk
 
 #logging
 import logging
@@ -23,18 +29,18 @@ from Event import Event
 
 fastq_paths = {
   'closed' : {},
-  'r9rnn' :         { 'template' : '/Analyses/Basecall_RNN_1D_%03d/BaseCalled_template'},
-  'metrichor1.16' : { 'template' : '/Analyses/Basecall_1D_%03d/BaseCalled_template',
-                      'complement' : '/Analyses/Basecall_1D_%03d/BaseCalled_complement',
-                      'twodirections' : '/Analyses/Basecall_2D_%03d/BaseCalled_2D',
-                      'pre_basecalled' : '/Analyses/EventDetection_000/Reads/'
+  'r9rnn' :         { 'template' : ('/Analyses/Basecall_RNN_1D_%03d/BaseCalled_template', '1D') },
+  'metrichor1.16' : { 'template' : ('/Analyses/Basecall_1D_%03d/BaseCalled_template', '1D'),
+                      'complement' : ('/Analyses/Basecall_1D_%03d/BaseCalled_complement', '1D'),
+                      'twodirections' : ('/Analyses/Basecall_2D_%03d/BaseCalled_2D', '1D'),
+                      'pre_basecalled' : ('/Analyses/EventDetection_000/Reads/',)
                     },
-  'classic' :       { 'template' : '/Analyses/Basecall_2D_%03d/BaseCalled_template',
-                      'complement' : '/Analyses/Basecall_2D_%03d/BaseCalled_complement',
-                      'twodirections' : '/Analyses/Basecall_2D_%03d/BaseCalled_2D',
-                      'pre_basecalled' : '/Analyses/EventDetection_000/Reads/'
+  'classic' :       { 'template' : ('/Analyses/Basecall_2D_%03d/BaseCalled_template', '2D'),
+                      'complement' : ('/Analyses/Basecall_2D_%03d/BaseCalled_complement', '2D'),
+                      'twodirections' : ('/Analyses/Basecall_2D_%03d/BaseCalled_2D', '2D'),
+                      'pre_basecalled' : ('/Analyses/EventDetection_000/Reads/',)
                     },
-  'prebasecalled' : {'pre_basecalled' : '/Analyses/EventDetection_000/Reads/'}
+  'prebasecalled' : {'pre_basecalled' : ('/Analyses/EventDetection_000/Reads/',)}
 }
 
 FAST5SET_FILELIST = 0
@@ -43,6 +49,19 @@ FAST5SET_SINGLEFILE = 2
 FAST5SET_TARBALL = 3
 PORETOOLS_TMPDIR = '.poretools_tmp'
 
+def walker(d, results):
+    for entry in scandir(d):
+        if entry.is_dir() and entry.name != '.':
+             walker(d+'/'+entry.name, results)
+        else:
+             results.append((d, entry.name, entry.inode()))
+
+def inode_walk(d):
+    results = []
+    walker(d, results)
+    # sort by inode order
+    results.sort(key=itemgetter(2))
+    return results
 
 class Fast5DirHandler(object):
 
@@ -80,7 +99,7 @@ class Fast5DirHandler(object):
 
 class Fast5FileSet(object):
 
-	def __init__(self, fileset, group=0):
+	def __init__(self, fileset, group=0, basecaller_name=None):
 		if isinstance(fileset, list):
 			self.fileset = fileset
 		elif isinstance(fileset, str):
@@ -88,6 +107,7 @@ class Fast5FileSet(object):
 		self.set_type = None
 		self.num_files_in_set = None
 		self.group = group
+		self.basecaller_name = basecaller_name
 		self._extract_fast5_files()
 
 	def get_num_files(self):
@@ -103,9 +123,11 @@ class Fast5FileSet(object):
 
 	def next(self):
 		try:
-			return Fast5File(self.files.next(), self.group)
+			return Fast5File(self.files.next(), self.group, self.basecaller_name)
 		except Exception as e:
 			# cleanup our mess
+			print >>sys.stderr, e
+
 			if self.set_type == FAST5SET_TARBALL:
 				shutil.rmtree(PORETOOLS_TMPDIR)
 			raise StopIteration
@@ -124,9 +146,14 @@ class Fast5FileSet(object):
 			if os.path.isdir(f):
 				# Update (2/3/17) to account for new sub-directory
 				# output from MinKNOW v1.4 release.
-				files = [os.path.join(dirpath + os.path.sep + fast5file) \
-								for dirpath, dirname, files in os.walk(f) \
-									for fast5file in files]
+
+				#files = [os.path.join(dirpath + os.path.sep + fast5file) \
+				#				for dirpath, dirname, files in os.walk(f) \
+				#					for fast5file in files if fast5file.endswith('.fast5')]
+				files = [os.path.join(dirpath + os.path.sep + filename) \
+								for dirpath, filename, inode in inode_walk(f) \
+								if filename.endswith('.fast5')]
+
 				#pattern = f + '/' + '*.fast5'
 				#files = glob.glob(pattern)
 				self.files = iter(files)
@@ -183,15 +210,39 @@ class TarballFileIterator:
 		with tarfile.open(self._tarball) as tar:
 			return len(tar.getnames())
 
+class NoSuchBasecaller(Exception):
+	pass
 
 class Fast5File(object):
-
-	def __init__(self, filename, group=0):
+	def __init__(self, filename, group=0, basecaller_name=None):
 		self.filename = filename
-		self.group = group
 		self.is_open = self.open()
+
 		if self.is_open:
+			if basecaller_name:
+				self.group = self.find_group_with_basecaller(basecaller_name)
+				if self.group is None:
+					self.close()
+					return
+			else:
+				if group == -1:
+					self.group = self.find_highest_group()
+				else:
+					self.group = group
+
+
 			self.version = self.guess_version()
+
+			if basecaller_name:
+				self.group = self.find_group_with_basecaller(basecaller_name)
+				if self.group is None:
+					self.close()
+					return
+			else:
+				if group == -1:
+					self.group = self.find_highest_group()
+				else:
+					self.group = group
 		else:
 			self.version = 'closed'
 
@@ -252,7 +303,48 @@ class Fast5File(object):
                         pass
 
 		return 'prebasecalled'
-			
+
+	def find_highest_group(self):
+		group = 0
+		while True:
+			try:
+				self.hdf5file["/Analyses/Basecall_1D_%03d" % (group)]
+				group += 1
+			except KeyError:
+				break
+		return max((0, group-1))
+
+	def get_basecaller_version(self, g):
+		try:
+			return g.attrs['chimaera version']
+		except:
+			pass
+
+		try:
+			return g.attrs['version']
+		except:
+			return None
+
+	def find_group_with_basecaller(self, basecaller):
+		if '=' in basecaller:
+			name, version = basecaller.split('=')
+		else:
+			name = basecaller
+			version = None
+
+		analyses = self.hdf5file.get('Analyses')
+		if analyses:
+			for k, g in analyses.iteritems():
+				m = re.match('Basecall_1D_(\d+)', k)
+				if m:
+					if g.attrs['name'] == name:
+						if version:
+							if version == self.get_basecaller_version(g):
+								return int(m.group(1))
+						else:
+							return int(m.group(1))
+		return None
+
 	def close(self):
 		"""
 		Close an open an ONT Fast5 file, assuming HDF5 format
@@ -465,7 +557,11 @@ class Fast5File(object):
 		else:
 			path = "/Analyses/Basecall_1D_000"
 
-		basecall = self.hdf5file[path]
+		try:
+			basecall = self.hdf5file[path]
+		except:
+			return None
+
 		path = basecall.get('InputEvents', getlink=True)
 		if path is None:
 			return None
@@ -525,7 +621,7 @@ Please report this error (with the offending file) to:
 		self.hdf_internal_error("unknown HDF5 structure: can't find read block item")
 
 	def find_event_timing_block(self):
-		path = fastq_paths[self.version]['template'] % (self.group)
+		path = fastq_paths[self.version]['template'][0] % (self.group)
 		try:
 			node = self.hdf5file[path]
 			path = node.get('Events')
@@ -577,6 +673,10 @@ Please report this error (with the offending file) to:
 			#      rounding values instead of truncating to int.
 			return int(node.attrs['duration'])
 		return None
+
+	def get_read_id(self):
+		node = self.find_read_number_block_fixed_raw()
+		return node.attrs['read_id']
 
 	def get_start_time(self):
 		# poretools returns a unix timestamp not samples
@@ -808,7 +908,7 @@ Please report this error (with the offending file) to:
 		Pull out the event count for the template strand
 		"""
 		try:
-			table = self.hdf5file[fastq_paths[self.version]['template'] % self.group]
+			table = self.hdf5file[fastq_paths[self.version]['template'][0] % self.group]
 			return len(table['Events'][()])
 		except Exception, e:
 			return 0
@@ -818,7 +918,7 @@ Please report this error (with the offending file) to:
 		Pull out the event count for the complementary strand
 		"""
 		try:
-			table = self.hdf5file[fastq_paths[self.version]['complement'] % self.group]
+			table = self.hdf5file[fastq_paths[self.version]['complement'][0] % self.group]
 			return len(table['Events'][()])
 		except Exception, e:
 			return 0
@@ -864,9 +964,11 @@ Please report this error (with the offending file) to:
 		"""
 		for id, h5path in fastq_paths[self.version].iteritems(): 
 			try:
-				table = self.hdf5file[h5path % self.group]
+				table = self.hdf5file[h5path[0] % self.group]
 				fq = formats.Fastq(table['Fastq'][()])
-				fq.name += " " + self.filename
+				record_id, desc = fq.name.split(" ")
+				record_id += ":%s_%03d:%s" % (h5path[1], self.group, id)
+				fq.name = record_id + ' ' + desc + ' ' + self.filename
 				self.fastqs[id] = fq
 			except Exception, e:
 				pass
@@ -877,9 +979,11 @@ Please report this error (with the offending file) to:
 		"""
 		for id, h5path in fastq_paths[self.version].iteritems(): 
 			try:
-				table = self.hdf5file[h5path % self.group]
+				table = self.hdf5file[h5path[0] % self.group]
 				fa = formats.Fasta(table['Fastq'][()])
-				fa.name += " " + self.filename
+				record_id, desc = fa.name.split(" ")
+				record_id += ":%s_%03d:%s" % (h5path[1], self.group, id)
+				fa.name = record_id + ' ' + desc + ' ' + self.filename
 				self.fastas[id] = fa
 			except Exception, e:
 				pass
@@ -889,7 +993,7 @@ Please report this error (with the offending file) to:
 		Pull out the event information for the template strand
 		"""
 		try:
-			table = self.hdf5file[fastq_paths[self.version]['template'] % self.group]
+			table = self.hdf5file[fastq_paths[self.version]['template'][0] % self.group]
 			self.template_events = [Event(x) for x in table['Events'][()]]
 		except Exception, e:
 			self.template_events = []
@@ -899,7 +1003,7 @@ Please report this error (with the offending file) to:
 		Pull out the event information for the complementary strand
 		"""
 		try:
-			table = self.hdf5file[fastq_paths[self.version]['complement'] % self.group]
+			table = self.hdf5file[fastq_paths[self.version]['complement'][0] % self.group]
 			self.complement_events = [Event(x) for x in table['Events'][()]]
 		except Exception, e:
 			self.complement_events = []
@@ -909,7 +1013,7 @@ Please report this error (with the offending file) to:
 		Pull out the pre-basecalled event information 
 		"""
 		# try:
-		table = self.hdf5file[fastq_paths[self.version]['pre_basecalled']]
+		table = self.hdf5file[fastq_paths[self.version]['pre_basecalled'][0]]
 		events = []
 		for read in table:
 			events.extend(table[read]["Events"][()])
